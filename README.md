@@ -1,7 +1,22 @@
 # Buildpacks Demo
 
-A minimal end-to-end example of using [Cloud Native Buildpacks](https://buildpacks.io)
-to containerize a Node.js application — including a hand-rolled Node.js buildpack.
+A minimal end-to-end example of using [Cloud Native Buildpacks](https://buildpacks.io) (in 3 ways) to containerize a Node.js application.
+
+## Run the demo
+
+Build all of the images using `pack` and run vulnerability scans using `grype`.
+
+```
+./scripts/demo.sh
+
+...
+
+Image                             Critical        High      Medium         Low  Negligible     Unknown       Total
+------------------------------------------------------------------------------------------------------------------
+Heroku stock                             0           0        1019         149          39           0        1207
+Custom buildpack                         1          24        1027         154          39           0        1245
+Chainguard base                          0           0           1           0           0           0           1
+```
 
 ## Layout
 
@@ -61,15 +76,14 @@ pack config default-builder heroku/builder:24
 ```
 
 `heroku/builder:24` is multi-arch (amd64 + arm64), so it builds natively
-on both Intel/AMD and Apple Silicon hosts. The older
+on both Intel/AMD and Apple Silicon hosts. 
 `paketobuildpacks/builder-jammy-base` is amd64-only — using it on an arm64
 Mac forces Docker into Rosetta/qemu translation, which can fail at runtime
-with errors like `libatomic.so.1: cannot open shared object file`. Stick
-with a multi-arch builder unless you specifically need Paketo's stack.
+with errors.
 
 ---
 
-## Option 1 — Build with a stock builder (fastest path)
+## Option 1 — Build with a stock builder
 
 Paketo's Node.js buildpack is bundled in the default builder, so no custom
 buildpack is required to get an image:
@@ -167,7 +181,7 @@ pack build example-demo-app:chainguard \
   --run-image example/run-chainguard-node:latest
 ```
 
-### Sourcing Node.js from the base (no env flag needed)
+### A note on the Node.js binary used
 
 Without intervention, the buildpack's downloaded Node.js layer would be
 prepended to `PATH` at launch and shadow the Chainguard image's
@@ -185,20 +199,6 @@ You'll see this line in the build log:
 ```
 ---> Node.js will be sourced from the run image at launch (autodetect (CNB_TARGET_DISTRO_NAME=wolfi))
 ```
-
-To override the autodetect:
-
-| Setting                       | Behavior                                                        |
-| ----------------------------- | --------------------------------------------------------------- |
-| (unset)                       | Autodetect: `wolfi` → use base, else install into launch layer. |
-| `BP_NODE_FROM_BASE=true`      | Always use the base's Node; never carry our copy at launch.     |
-| `BP_NODE_FROM_BASE=false`     | Always install our Node into the launch layer.                  |
-
-The heuristic is conservative — it's a label check, not a filesystem
-probe (the build phase never sees the run image's contents). If you
-point `--run-image` at a Wolfi base that *doesn't* ship Node (e.g. bare
-`cgr.dev/chainguard/wolfi-base`), pass `BP_NODE_FROM_BASE=false` to
-restore the launch-layer install.
 
 Run + verify:
 
@@ -219,13 +219,12 @@ Chainguard run images.
 ### Verify it's actually Chainguard underneath
 
 ```sh
-pack inspect example-demo-app:chainguard | grep -i 'run image'
 docker image inspect example-demo-app:chainguard \
   --format '{{ index .Config.Labels "io.buildpacks.base.distro.name" }}'
 # wolfi
 ```
 
-### Caveats
+### Additional Notes
 
 - **File ownership across UID boundary.** The build phase chowns app files
   to the build image's user (UID 1000 for both Heroku and Paketo builders).
@@ -242,7 +241,7 @@ docker image inspect example-demo-app:chainguard \
   `engines.node` in `package.json` to match the version shipped in
   `cgr.dev/chainguard/node` (check with
   `docker run --rm cgr.dev/chainguard/node --version`).
-- **Stack-id "white lie".** The wrapper declares
+- **Stack-id.** The wrapper declares
   `io.buildpacks.stack.id=heroku-24` even though the OS is Wolfi. This
   satisfies pre-0.12 lifecycle stack matching against the Heroku builder;
   newer lifecycles use `io.buildpacks.base.*` and ignore the stack label.
@@ -251,15 +250,19 @@ docker image inspect example-demo-app:chainguard \
 
 ---
 
-## Rebuild speed
+## Vulnerability Comparisons
 
-Because both `nodejs` and `node_modules` layers are marked `cache = true`,
-subsequent builds skip the Node.js download and reuse `node_modules` when
-`package-lock.json` is unchanged:
+```
+$ ./scripts/scan.sh
+scanning example-demo-app:paketo...
+scanning example-demo-app:custom-buildpack...
+scanning example-demo-app:chainguard...
 
-```sh
-pack build example-demo-app:example --path ./app --buildpack ./buildpack
-# ... 'Reusing cached layer' for nodejs + node_modules
+Image                             Critical        High      Medium         Low  Negligible     Unknown       Total
+------------------------------------------------------------------------------------------------------------------
+Heroku stock                             0           0        1019         149          39           0        1207
+Custom buildpack                         1          24        1027         154          39           0        1245
+Chainguard base                          0           0           1           0           0           0           1
 ```
 
 ## Verifying the running container
@@ -273,36 +276,3 @@ curl -s -X POST localhost:8080/api/echo \
   -d '{"hello":"world"}' | jq
 docker rm -f demo
 ```
-
-## Pinning a different Node.js version
-
-Edit `app/package.json` and pin an exact version:
-
-```json
-"engines": { "node": "20.11.1" }
-```
-
-Anything that isn't an exact `X.Y.Z` (e.g. `>=20`, `^20.11`) is ignored and
-the buildpack default in `buildpack/buildpack.toml` is used instead.
-
-## Troubleshooting
-
-- **`ERROR: failed to build: executing lifecycle: ... no buildpack groups passed detection`**
-  The custom buildpack opted out — confirm `app/package.json` exists and that
-  you passed `--path ./app`.
-- **`libatomic.so.1: cannot open shared object file` on Apple Silicon**
-  You built an amd64 image and Docker is trying to run it under Rosetta/qemu
-  translation on your arm64 Mac. Use a **multi-arch** builder so `pack`
-  produces a native arm64 image. `heroku/builder:24` and
-  `paketobuildpacks/ubi-10-builder` both ship amd64+arm64 manifests; the old
-  `paketobuildpacks/builder-jammy-base` is amd64-only and was the source of
-  this error. If you must use an amd64-only builder, pass `--platform
-  linux/amd64` to both `pack build` and `docker run` so the platform is at
-  least consistent (and accept the emulation overhead).
-- **`exec format error` when running the container**
-  The host's docker is picking a wrong-arch manifest. `pack inspect <image>`
-  shows the image's architecture; force it with `docker run --platform
-  linux/arm64 ...` (or amd64) to match the host.
-- **Slow first build**
-  Expected — the builder image and Node.js tarball are pulled once and then
-  cached.
