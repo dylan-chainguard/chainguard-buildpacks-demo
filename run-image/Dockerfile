@@ -8,7 +8,7 @@
 # invoke `node` directly (not `npm start`, which is a shell script).
 #
 # Inherited from cgr.dev/chainguard/node:latest:
-#   User       = 65532  (differs from Paketo build image's cnb UID 1000 — required by spec)
+#   User       = 65532  (differs from the build image's user UID 1000 — required by spec)
 #   WorkingDir = /app
 #   PATH       = /usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin
 #   Entrypoint = /usr/bin/node    (overridden by the lifecycle exporter to /cnb/process/web)
@@ -25,6 +25,5 @@ LABEL io.buildpacks.base.id="com.example.chainguard.node" \
       io.buildpacks.rebasable="true"
 
 # Legacy stack id — must match the build image's stack so the lifecycle's
-# pre-0.12 stack-matching check passes. paketobuildpacks/builder-jammy-base
-# declares io.buildpacks.stacks.jammy.
-LABEL io.buildpacks.stack.id="io.buildpacks.stacks.jammy"
+# pre-0.12 stack-matching check passes. heroku/builder:24 declares heroku-24.
+LABEL io.buildpacks.stack.id="heroku-24"

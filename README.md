@@ -57,8 +57,15 @@ docker info >/dev/null && echo "docker ok"
 Set a default builder once so you don't need `--builder` every time:
 
 ```sh
-pack config default-builder paketobuildpacks/builder-jammy-base
+pack config default-builder heroku/builder:24
 ```
+
+`heroku/builder:24` is multi-arch (amd64 + arm64), so it builds natively
+on both Intel/AMD and Apple Silicon hosts. The older
+`paketobuildpacks/builder-jammy-base` is amd64-only — using it on an arm64
+Mac forces Docker into Rosetta/qemu translation, which can fail at runtime
+with errors like `libatomic.so.1: cannot open shared object file`. Stick
+with a multi-arch builder unless you specifically need Paketo's stack.
 
 ---
 
@@ -70,7 +77,7 @@ buildpack is required to get an image:
 ```sh
 pack build example-demo-app:paketo \
   --path ./app \
-  --builder paketobuildpacks/builder-jammy-base
+  --builder heroku/builder:24
 ```
 
 Run it:
@@ -88,9 +95,9 @@ Use the buildpack in this repo directly from its source directory. `pack`
 packages it on the fly:
 
 ```sh
-pack build example-demo-app:example \
+pack build example-demo-app:custom-buildpack \
   --path ./app \
-  --builder paketobuildpacks/builder-jammy-base \
+  --builder heroku/builder:24 \
   --buildpack ./buildpack
 ```
 
@@ -123,15 +130,15 @@ pack inspect example-demo-app:example
 
 ## Option 3 — Build on a Chainguard base image
 
-The default Paketo run image (`paketobuildpacks/run-jammy-base`) is full
-Ubuntu Jammy. Swapping it for `cgr.dev/chainguard/node` gives a distroless,
+The default `heroku/builder:24` run image (`heroku/heroku:24`) is full
+Ubuntu Noble. Swapping it for `cgr.dev/chainguard/node` gives a distroless,
 Wolfi-based final image with a much smaller attack surface.
 
 ### How the swap works
 
 The buildpack lifecycle takes *two* images: a **build image** (where
 detect/build run) and a **run image** (the base of the final app image). We
-keep the Paketo Jammy builder for the build phase and only swap the run image.
+keep the Heroku builder for the build phase and only swap the run image.
 
 A bare `cgr.dev/chainguard/node` is missing CNB metadata, so the lifecycle
 won't accept it. `run-image/Dockerfile` wraps it with the labels the spec
@@ -146,7 +153,7 @@ requires:
 | `io.buildpacks.stack.id`             | Legacy stack ID — must equal the build image's. Pre-0.12 lifecycles still match on this. |
 
 The base image's existing `User=65532` is preserved (and differs from the
-Paketo build image's `cnb` user at UID 1000, which the spec requires).
+Heroku build image's user at UID 1000, which the spec requires).
 
 ### Build it
 
@@ -155,7 +162,7 @@ docker build -t example/run-chainguard-node:latest ./run-image
 
 pack build example-demo-app:chainguard \
   --path ./app \
-  --builder paketobuildpacks/builder-jammy-base \
+  --builder heroku/builder:24 \
   --buildpack ./buildpack \
   --run-image example/run-chainguard-node:latest
 ```
@@ -206,7 +213,7 @@ curl -s localhost:8080/ | jq
 binary is a `#!/bin/sh` wrapper script, so launching it on a shell-less
 image fails. `buildpack/bin/build` writes a `launch.toml` that invokes
 `node <main>` directly (resolving `<main>` from `package.json`'s `main`
-field, defaulting to `server.js`). This works on both the Paketo and
+field, defaulting to `server.js`). This works on both the Heroku and
 Chainguard run images.
 
 ### Verify it's actually Chainguard underneath
@@ -221,10 +228,11 @@ docker image inspect example-demo-app:chainguard \
 ### Caveats
 
 - **File ownership across UID boundary.** The build phase chowns app files
-  to UID 1000 (Paketo cnb). The Chainguard run image runs as 65532. Read-only
-  workloads (like this demo) are fine because exported layers default to
-  `0644`. Apps that write to their own bundled files may hit `EACCES` —
-  fix by writing only to `/tmp` or a writable volume.
+  to the build image's user (UID 1000 for both Heroku and Paketo builders).
+  The Chainguard run image runs as 65532. Read-only workloads (like this
+  demo) are fine because exported layers default to `0644`. Apps that write
+  to their own bundled files may hit `EACCES` — fix by writing only to
+  `/tmp` or a writable volume.
 - **Native modules use the build-time Node ABI.** Even with
   `BP_NODE_FROM_BASE=true`, `npm install` runs during the build phase
   against the buildpack's downloaded Node.js (currently 20.11.1), so any
@@ -235,9 +243,11 @@ docker image inspect example-demo-app:chainguard \
   `cgr.dev/chainguard/node` (check with
   `docker run --rm cgr.dev/chainguard/node --version`).
 - **Stack-id "white lie".** The wrapper declares
-  `io.buildpacks.stack.id=io.buildpacks.stacks.jammy` even though the OS is
-  Wolfi. This satisfies pre-0.12 lifecycle stack matching; newer lifecycles
-  use `io.buildpacks.base.*` and ignore the stack label.
+  `io.buildpacks.stack.id=heroku-24` even though the OS is Wolfi. This
+  satisfies pre-0.12 lifecycle stack matching against the Heroku builder;
+  newer lifecycles use `io.buildpacks.base.*` and ignore the stack label.
+  If you switch to a different builder, update this label to match
+  (e.g. `io.buildpacks.stacks.jammy` for Paketo Jammy).
 
 ---
 
@@ -280,10 +290,19 @@ the buildpack default in `buildpack/buildpack.toml` is used instead.
 - **`ERROR: failed to build: executing lifecycle: ... no buildpack groups passed detection`**
   The custom buildpack opted out — confirm `app/package.json` exists and that
   you passed `--path ./app`.
-- **`exec format error` when running the container on Apple Silicon**
-  The buildpack downloads `linux-arm64` when built on `aarch64`. If you're
-  cross-building, pass `--platform linux/amd64` to both `pack build` and
-  `docker run`.
+- **`libatomic.so.1: cannot open shared object file` on Apple Silicon**
+  You built an amd64 image and Docker is trying to run it under Rosetta/qemu
+  translation on your arm64 Mac. Use a **multi-arch** builder so `pack`
+  produces a native arm64 image. `heroku/builder:24` and
+  `paketobuildpacks/ubi-10-builder` both ship amd64+arm64 manifests; the old
+  `paketobuildpacks/builder-jammy-base` is amd64-only and was the source of
+  this error. If you must use an amd64-only builder, pass `--platform
+  linux/amd64` to both `pack build` and `docker run` so the platform is at
+  least consistent (and accept the emulation overhead).
+- **`exec format error` when running the container**
+  The host's docker is picking a wrong-arch manifest. `pack inspect <image>`
+  shows the image's architecture; force it with `docker run --platform
+  linux/arm64 ...` (or amd64) to match the host.
 - **Slow first build**
   Expected — the builder image and Node.js tarball are pulled once and then
   cached.
