@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+# Buildpack API 0.10 contract:
+#   $1 - platform dir (env vars, bindings)
+#   $2 - build plan path (we write requirements here)
+#   exit 0   -> participate in build
+#   exit 100 -> do not participate
+#   exit !=0 -> error
+
+# platform_dir="$1"   # unused
+plan_path="$2"
+
+if [[ ! -f package.json ]]; then
+  echo "no package.json found in app directory"
+  exit 100
+fi
+
+cat > "${plan_path}" <<EOF
+[[provides]]
+name = "node"
+
+[[requires]]
+name = "node"
+
+  [requires.metadata]
+  build = true
+  launch = true
+EOF

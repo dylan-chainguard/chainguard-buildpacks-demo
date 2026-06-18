@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+# Buildpack API 0.10 contract:
+#   $1 - layers dir   (where we place layer dirs + <layer>.toml metadata)
+#   $2 - platform dir (env vars, bindings)
+#   $3 - build plan   (resolved plan we requested in detect)
+#
+# Run inside the build image with the app source as CWD.
+# On success, write a launch.toml describing process types.
+
+layers_dir="$1"
+# platform_dir="$2"   # unused
+# plan_path="$3"      # unused
+
+echo "---> Node.js Buildpack"
+
+# ----------------------------------------------------------------------------
+# Resolve Node.js version: package.json "engines.node" wins, else default.
+# ----------------------------------------------------------------------------
+default_node_version="22.11.0"
+node_version="${default_node_version}"
+
+if command -v jq >/dev/null 2>&1; then
+  engines_node="$(jq -r '.engines.node // empty' package.json 2>/dev/null || true)"
+  # Accept only a clean "X.Y.Z" pin; ignore ranges like ">=20".
+  if [[ "${engines_node}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    node_version="${engines_node}"
+  fi
+fi
+
+echo "---> Using Node.js ${node_version}"
+
+# ----------------------------------------------------------------------------
+# Node.js layer: cached + available at build and launch.
+# ----------------------------------------------------------------------------
+node_layer="${layers_dir}/nodejs"
+node_layer_toml="${layers_dir}/nodejs.toml"
+mkdir -p "${node_layer}"
+
+cached_version=""
+if [[ -f "${node_layer_toml}" ]]; then
+  cached_version="$(grep -E '^version' "${node_layer_toml}" | sed -E 's/.*= *"([^"]+)".*/\1/' || true)"
+fi
+
+if [[ "${cached_version}" != "${node_version}" ]]; then
+  echo "---> Downloading Node.js ${node_version}"
+  rm -rf "${node_layer:?}"/*
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64)  node_arch="linux-x64" ;;
+    aarch64) node_arch="linux-arm64" ;;
+    *) echo "unsupported arch: ${arch}" >&2; exit 1 ;;
+  esac
+  url="https://nodejs.org/dist/v${node_version}/node-v${node_version}-${node_arch}.tar.xz"
+  curl -fsSL "${url}" | tar -xJ -C "${node_layer}" --strip-components 1
+fi
+
+# Decide whether to carry our downloaded Node.js into the final image.
+#
+# Autodetect via CNB_TARGET_DISTRO_NAME, which the lifecycle populates from
+# the run image's io.buildpacks.base.distro.name label (Platform API >= 0.10).
+# Wolfi-based run images in our flow are wrapped Chainguard Node images that
+# already ship /usr/bin/node — duplicating it would shadow the base's binary.
+#
+# This is a heuristic, not a filesystem probe: the build phase never sees the
+# run image's contents. BP_NODE_FROM_BASE lets a caller force either side.
+#
+#   BP_NODE_FROM_BASE=true   -> never include our node in the launch image
+#   BP_NODE_FROM_BASE=false  -> always include it (override autodetect)
+#   unset                    -> use the wolfi autodetect
+
+node_launch="true"
+detect_source="default"
+
+case "${CNB_TARGET_DISTRO_NAME:-}" in
+  wolfi)
+    node_launch="false"
+    detect_source="autodetect (CNB_TARGET_DISTRO_NAME=wolfi)"
+    ;;
+esac
+
+case "${BP_NODE_FROM_BASE:-}" in
+  true)
+    node_launch="false"
+    detect_source="BP_NODE_FROM_BASE=true"
+    ;;
+  false)
+    node_launch="true"
+    detect_source="BP_NODE_FROM_BASE=false"
+    ;;
+esac
+
+if [[ "${node_launch}" == "false" ]]; then
+  echo "---> Node.js will be sourced from the run image at launch (${detect_source})"
+else
+  echo "---> Node.js will be installed into a launch layer (${detect_source})"
+fi
+
+cat > "${node_layer_toml}" <<EOF
+[types]
+build = true
+launch = ${node_launch}
+cache = true
+
+[metadata]
+version = "${node_version}"
+EOF
+
+export PATH="${node_layer}/bin:${PATH}"
+
+# ----------------------------------------------------------------------------
+# node_modules layer: cached, launch-available, not on PATH manipulation.
+# ----------------------------------------------------------------------------
+modules_layer="${layers_dir}/node_modules"
+modules_layer_toml="${layers_dir}/node_modules.toml"
+mkdir -p "${modules_layer}"
+
+cat > "${modules_layer_toml}" <<EOF
+[types]
+launch = true
+cache = true
+build = false
+EOF
+
+ln -sfn "${modules_layer}" node_modules
+
+echo "---> Installing production dependencies"
+if [[ -f package-lock.json ]]; then
+  npm ci --omit=dev --no-audit --no-fund
+else
+  npm install --omit=dev --no-audit --no-fund
+fi
+
+# ----------------------------------------------------------------------------
+# Launch configuration: default web process runs `node <main>` directly.
+# Direct exec (not `npm start`) so the image works on shell-less distroless
+# run images like cgr.dev/chainguard/node, where the `npm` wrapper script
+# can't be interpreted.
+# ----------------------------------------------------------------------------
+main_script="server.js"
+if command -v jq >/dev/null 2>&1; then
+  detected_main="$(jq -r '.main // empty' package.json 2>/dev/null || true)"
+  if [[ -n "${detected_main}" ]]; then
+    main_script="${detected_main}"
+  fi
+fi
+
+cat > "${layers_dir}/launch.toml" <<EOF
+[[processes]]
+type = "web"
+command = ["node"]
+args = ["${main_script}"]
+default = true
+EOF
+
+echo "---> Build complete"

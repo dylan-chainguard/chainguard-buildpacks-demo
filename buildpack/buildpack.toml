@@ -1,0 +1,17 @@
+api = "0.10"
+
+[buildpack]
+id = "com.example.nodejs"
+version = "0.1.0"
+name = "Example Node.js Buildpack"
+homepage = "https://github.com/example/example-buildpacks"
+description = "Installs Node.js, runs npm install, and configures a web process"
+
+[[stacks]]
+id = "io.buildpacks.stacks.jammy"
+
+[[stacks]]
+id = "*"
+
+[metadata]
+default-node-version = "22.11.0"

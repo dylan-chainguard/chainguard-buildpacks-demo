@@ -1,0 +1,15 @@
+[_]
+schema-version = "0.2"
+
+[project]
+id = "com.example.demo-app"
+name = "example-demo-app"
+version = "1.0.0"
+
+[build]
+exclude = [
+  "node_modules",
+  ".git",
+  ".gitignore",
+  "*.log",
+]
