@@ -155,7 +155,7 @@ detect/build run) and a **run image** (the base of the final app image). We
 keep the Heroku builder for the build phase and only swap the run image.
 
 A bare `cgr.dev/chainguard/node` is missing CNB metadata, so the lifecycle
-won't accept it. `run-image/Dockerfile` wraps it with the labels the spec
+won't accept it. The following labels can be added via Chainguard's [Custom Assembly](https://edu.chainguard.dev/chainguard/chainguard-images/features/ca-docs/custom-assembly/) feature. Alternatively, they can be added using a Dockerfile. `run-image/Dockerfile` wraps it with the labels the spec
 requires:
 
 | Label                                | Purpose                                                              |
@@ -164,7 +164,7 @@ requires:
 | `io.buildpacks.base.distro.name`     | OS distro identifier (`wolfi`).                                      |
 | `io.buildpacks.base.distro.version`  | OS distro version.                                                   |
 | `io.buildpacks.rebasable`            | Declares ABI compatibility across versions — needed for `pack rebase`.|
-| `io.buildpacks.stack.id`             | Legacy stack ID — must equal the build image's. Pre-0.12 lifecycles still match on this. |
+| `io.buildpacks.stack.id`             | `heroku-24` - Legacy stack ID — must equal the build image's. Pre-0.12 lifecycles still match on this. |
 
 The base image's existing `User=65532` is preserved (and differs from the
 Heroku build image's user at UID 1000, which the spec requires).
@@ -179,6 +179,36 @@ pack build example-demo-app:chainguard \
   --builder heroku/builder:24 \
   --buildpack ./buildpack \
   --run-image example/run-chainguard-node:latest
+```
+
+### Build it with a Custom Assembly image
+
+```
+# add the labels listed above as annotations
+chainctl image repo build edit --parent your-org --repo node --save-as node-buildpack
+
+...
+
+Image configuration changes:
+Legend: + to add, ~ to change, - to remove
+
+annotations (+8, ~0, -0, final: 8):
+  + io.buildpacks.base.description = "Chainguard distroless Node.js wrapped as a CNB run image"
+  + io.buildpacks.base.distro.name = "wolfi"
+  + io.buildpacks.base.distro.version = "latest"
+  + io.buildpacks.base.homepage = "https://images.chainguard.dev/directory/image/node/overview"
+  + io.buildpacks.base.id = "com.example.chainguard.node"
+  + io.buildpacks.base.maintainer = "example"
+  + io.buildpacks.rebasable = "true"
+  + io.buildpacks.stack.id = "heroku-24"
+
+...
+
+pack build example-demo-app:chainguard \
+  --path ./app \
+  --builder heroku/builder:24 \
+  --buildpack ./buildpack \
+  --run-image cgr.dev/your-org/node-buildpack:latest
 ```
 
 ### A note on the Node.js binary used
